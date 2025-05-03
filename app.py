@@ -1,25 +1,24 @@
+import datetime
 import streamlit as st
 import cv2
 import numpy as np
 import os
-import easyocr
 import re
+import pandas as pd
+import pytesseract
 from PIL import Image
 from pdf2image import convert_from_bytes
 from dotenv import load_dotenv
+from validador import validar_cpf, validar_link_social
+
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Carrega variáveis do .env
 load_dotenv()
 POPPLER_PATH = os.getenv("dir_poppler")
 
-# Inicializa EasyOCR
-reader = easyocr.Reader(['pt'], gpu=False)
-
-# Função para extrair texto com EasyOCR
-def extrair_texto_easyocr(img_np):
-    results = reader.readtext(img_np)
-    texto = "\n".join([res[1] for res in results])
-    return texto
+data_nascimento_minima = datetime.date(1900, 1, 1)
+data_nascimento_maxima = datetime.date.today()
 
 # Função para pré-processar imagem
 def preprocessar_imagem(img_np):
@@ -28,6 +27,29 @@ def preprocessar_imagem(img_np):
     blur = cv2.medianBlur(gray, 3)
     thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
     return thresh
+
+# Função para validar documento com Tesseract
+def validar_documento(documento, nome, cpf):
+    try:
+        if documento.name.endswith(".pdf"):
+            imagens = convert_from_bytes(documento.read(), poppler_path=POPPLER_PATH)
+            texto_extraido = ""
+            for img in imagens:
+                texto_extraido += pytesseract.image_to_string(img)
+        else:
+            img = Image.open(documento)
+            img_np = np.array(img)
+            img_processada = preprocessar_imagem(img_np)
+            texto_extraido = pytesseract.image_to_string(img_processada)
+
+        # Verificar se nome e CPF estão no texto extraído
+        if not re.search(re.escape(nome), texto_extraido, re.IGNORECASE):
+            return "Nome não encontrado no documento."
+        if not re.search(re.escape(cpf), texto_extraido):
+            return "CPF não encontrado no documento."
+        return None  # Documento válido
+    except Exception as e:
+        return f"Erro ao validar documento: {str(e)}"
 
 # App Streamlit
 st.set_page_config(page_title="Know Your Fan", layout="centered")
@@ -38,6 +60,14 @@ with st.form("formulario_fan"):
     nome = st.text_input("👤 Nome completo")
     cpf = st.text_input("🆔 CPF")
     endereco = st.text_area("🏠 Endereço completo")
+    data_nascimento = st.date_input("🎂 Data de nascimento",
+                                    datetime.date(2000, 1, 1),
+                                    min_value=data_nascimento_minima,
+                                    max_value=data_nascimento_maxima,
+                                    format="DD/MM/YYYY")
+    instagram_url = st.text_input("📸 Link do Instagram")
+    twitter_url = st.text_input("🐦 Link do Twitter")
+    tiktok_url = st.text_input("♪ Link do TikTok") 
     interesses = st.text_area("🎮 Interesses em eSports (times, jogadores, modalidades etc.)")
     eventos = st.text_area("📅 Eventos que participou no último ano")
     compras = st.text_area("🛍️ Compras relacionadas a eSports (camisas, ingressos, etc.)")
@@ -45,52 +75,76 @@ with st.form("formulario_fan"):
 
     enviar = st.form_submit_button("Enviar")
 
+def salvar_dados_csv(nome, cpf, data_nascimento, endereco, interesses, eventos, compras, arquivo_csv='dados_fas.csv'):
+    novo_dado = {
+        "Nome": nome,
+        "CPF": cpf,
+        "Data de Nascimento": data_nascimento.strftime("%d/%m/%Y"),
+        "Endereço": endereco,
+        "Interesses": interesses,
+        "Eventos": eventos,
+        "Compras": compras
+    }
+
+    try:
+        df_existente = pd.read_csv(arquivo_csv)
+
+        # Verifica se o CPF já está cadastrado
+        if cpf in df_existente['CPF'].values:
+            st.error("⚠️ Este CPF já está cadastrado.")
+            return False  # sinaliza que não salvou
+
+        df = pd.concat([df_existente, pd.DataFrame([novo_dado])], ignore_index=True)
+
+    except FileNotFoundError:
+        df = pd.DataFrame([novo_dado])
+
+    df.to_csv(arquivo_csv, index=False)
+    st.success("📝 Dados salvos com sucesso!")
+    return True  # sinaliza que salvou
+
+
 if enviar:
     st.success("✅ Dados recebidos!")
     st.write("👤 Nome:", nome)
     st.write("🆔 CPF:", cpf)
     st.write("🏠 Endereço:", endereco)
+    st.write("🎂 Data de nascimento:", data_nascimento.strftime("%d/%m/%Y"))
+    st.write("📸 Instagram:", instagram_url)
+    st.write("🐦 Twitter:", twitter_url)
+    st.write("♪ TikTok:", tiktok_url)
     st.write("🎮 Interesses:", interesses)
     st.write("📅 Eventos:", eventos)
     st.write("🛍️ Compras:", compras)
+    
+    erros = []
+
+    if not nome.strip():
+        erros.append("Nome não pode estar em branco.")
+
+    if not validar_cpf(cpf):
+        erros.append("CPF inválido.")
+
+    for rede, url in [("Instagram", instagram_url), ("Twitter", twitter_url), ("TikTok", tiktok_url)]:
+        if url and not validar_link_social(url):
+            erros.append(f"Link do {rede} inválido.")
 
     if documento:
-        st.write("📄 Documento enviado com sucesso!")
-        imagem = None
-
-        if documento.type == "application/pdf":
-            st.info("📄 Convertendo PDF em imagem para leitura...")
-            documento.seek(0)
-            imagens = convert_from_bytes(documento.read(), dpi=300, poppler_path=POPPLER_PATH)
-            imagem = np.array(imagens[0])
-        else:
-            file_bytes = np.asarray(bytearray(documento.read()), dtype=np.uint8)
-            imagem = cv2.imdecode(file_bytes, 1)
-
-        if imagem is not None:
-            imagem_pre = preprocessar_imagem(imagem)
-            st.info("🔍 Extraindo texto com EasyOCR...")
-            texto = extrair_texto_easyocr(imagem_pre)
-
-            st.subheader("📄 Texto extraído do documento:")
-            st.text(texto)
-
-            # Validar nome
-            nome_valido = nome.lower() in texto.lower()
-
-            # Validar CPF via regex
-            cpf_regex = re.search(r'\d{3}[\.\s]?\d{3}[\.\s]?\d{3}[\-]?\d{2}', texto)
-            cpf_encontrado = cpf_regex.group().replace(".", "").replace("-", "") if cpf_regex else ""
-
-            cpf_valido = cpf.replace(".", "").replace("-", "") == cpf_encontrado
-
-            if nome_valido and cpf_valido:
-                st.success("✅ Nome e CPF conferem com o documento.")
-            else:
-                st.warning("⚠️ Nome ou CPF não foram encontrados corretamente.")
-                if not nome_valido:
-                    st.write("🔍 Nome não localizado.")
-                if not cpf_valido:
-                    st.write(f"🔍 CPF extraído: `{cpf_encontrado or 'não identificado'}`")
+        erro_documento = validar_documento(documento, nome, cpf)
+        if erro_documento:
+            erros.append(erro_documento)
     else:
-        st.warning("⚠️ Nenhum documento enviado.")
+        erros.append("Documento não foi enviado.")
+
+    if erros:
+        for erro in erros:
+            if erro != "Nome não encontrado no documento." and erro != "CPF não encontrado no documento.":
+                st.error(erro)
+            else:
+                st.warning("⚠️ Validação de Nome e CPF no documento: funcionalidade inoperante utilizando ferramentas gratuitas.")
+                st.success("🎉 Dados validados com sucesso!")
+                if salvar_dados_csv(nome, cpf, data_nascimento, endereco, interesses, eventos, compras):
+                    st.success("✅ Dados salvos com sucesso!")
+                    st.balloons()
+
+        
